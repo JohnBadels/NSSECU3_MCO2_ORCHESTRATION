@@ -1,148 +1,87 @@
-import subprocess
 import os
-import yara
-import argparse
+import shutil
+import subprocess
+import json
 
-# Function to run Bulk Extractor
-def run_bulk_extractor(input_image, output_dir):
+def get_input_path():
+    return input("Enter the path of the input file or directory: ")
+
+def get_output_path():
+    return input("Enter the path for the output directory: ")
+
+def clear_output_directory(output_path):
+    if os.path.exists(output_path):
+        shutil.rmtree(output_path)
+    os.makedirs(output_path)
+
+def run_bulk_extractor(input_path, output_path):
+    print(f"Running Bulk Extractor on {input_path}...")
+    command = f"bulk_extractor -o {output_path} {input_path}"
     try:
-        os.makedirs(output_dir, exist_ok=True)
-        if os.path.isdir(input_image):
-            cmd = ['bulk_extractor', '-R', '-o', output_dir, input_image]
-        else:
-            cmd = ['bulk_extractor', '-o', output_dir, input_image]
-        subprocess.run(cmd, check=True)
-        print(f"Bulk Extractor finished. Results are in {output_dir}")
+        subprocess.run(command, shell=True, check=True)
+        print(f"Bulk Extractor scan completed. Results saved to {output_path}")
     except subprocess.CalledProcessError as e:
         print(f"Error running Bulk Extractor: {e}")
+        exit(1)
 
-# Function to load YARA rules
-def load_yara_rules(rule_path):
+def run_yara(yara_rule, bulk_extractor_output, output_path):
+    yara_output = os.path.join(output_path, "yara_results.txt")
+    print(f"Running YARA on {bulk_extractor_output}...")
+    command = f"yara -r {yara_rule} {bulk_extractor_output} > {yara_output}"
     try:
-        rules = yara.compile(filepath=rule_path)
-        return rules
-    except yara.SyntaxError as e:
-        print(f"YARA Syntax Error: {e}")
-    except Exception as e:
-        print(f"Error loading YARA rules: {e}")
-    return None
+        subprocess.run(command, shell=True, check=True)
+        print(f"YARA scan completed. Results saved to {yara_output}")
+    except subprocess.CalledProcessError as e:
+        print(f"Error running YARA: {e}")
+        exit(1)
+    except FileNotFoundError:
+        print("YARA is not installed or not in the system PATH.")
+        exit(1)
+    return yara_output
 
-# Function to apply YARA rules on extracted data
-def apply_yara_rules(rules, extracted_files):
-    matches = []
-    for file in extracted_files:
-        with open(file, 'rb') as f:
-            data = f.read()
-            match = rules.match(data=data)
-            if match:
-                matches.append((file, match))
-    return matches
-
-# Function to find all files in a directory
-def get_all_files(directory):
-    files = []
-    for root, _, filenames in os.walk(directory):
-        for filename in filenames:
-            files.append(os.path.join(root, filename))
-    return files
-
-# Function to parse Bulk Extractor output files for artifacts
-def parse_bulk_extractor_output(output_dir):
-    artifacts = {
-        "emails": [],
-        "domains": [],
-        "credit_cards": [],
-        "telephone_numbers": [],
+def create_consolidated_report(bulk_output_path, yara_output_file, report_file):
+    report_data = {
+        "bulk_extractor_results": {},
+        "yara_results": []
     }
-    
-    file_mappings = {
-        "email.txt": "emails",
-        "domain_histogram.txt": "domains",
-        "ccn_track2.txt": "credit_cards",
-        "telephone.txt": "telephone_numbers",
-    }
-    
-    for file_name, key in file_mappings.items():
-        file_path = os.path.join(output_dir, file_name)
-        if os.path.exists(file_path):
-            with open(file_path, 'r') as f:
-                artifacts[key].extend(f.readlines())
-    
-    return artifacts
 
-# Function to write YARA results to a file
-def write_yara_results(matches, output_file):
-    with open(output_file, 'w') as f:
-        for file, match in matches:
-            for rule in match:
-                f.write(f"{rule.rule} {file}\n")
+    # Add Bulk Extractor results
+    bulk_files = os.listdir(bulk_output_path)
+    for file in bulk_files:
+        file_path = os.path.join(bulk_output_path, file)
+        if os.path.isfile(file_path):
+            with open(file_path, 'r', errors='ignore') as f:
+                content = f.read()
+                report_data["bulk_extractor_results"][file] = content
 
-# Function to write a final report
-def write_final_report(output_dir, matches, artifacts):
-    report_file = os.path.join(output_dir, 'final_report.txt')
-    with open(report_file, 'w') as f:
-        f.write("Bulk Extractor Artifact Analysis:\n")
-        f.write("----------------------------------------------------------------------\n")
-        
-        f.write("Extracted Email Addresses:\n")
-        for email in artifacts["emails"]:
-            f.write(email)
-        
-        f.write("\nExtracted Domain Names:\n")
-        for domain in artifacts["domains"]:
-            f.write(domain)
-        
-        f.write("\nExtracted Credit Card Numbers:\n")
-        for cc in artifacts["credit_cards"]:
-            f.write(cc)
-        
-        f.write("\nExtracted Telephone Numbers:\n")
-        for phone in artifacts["telephone_numbers"]:
-            f.write(phone)
-        
-        f.write("\nYARA Pattern-Based Analysis:\n")
-        f.write("----------------------------------------------------------------------\n")
-        for file, match in matches:
-            for rule in match:
-                f.write(f"{rule.rule} {file}\n")
+    # Add YARA results
+    with open(yara_output_file, 'r', errors='ignore') as yara_file:
+        yara_results = yara_file.readlines()
+        for line in yara_results:
+            report_data["yara_results"].append(line.strip())
 
-# Main function to orchestrate the forensic analysis
-def forensic_analysis(input_image, output_dir, yara_rule_path):
-    # Step 1: Run Bulk Extractor
-    run_bulk_extractor(input_image, output_dir)
-    
-    # Step 2: Load YARA rules
-    rules = load_yara_rules(yara_rule_path)
-    if not rules:
-        return
-    
-    # Step 3: Get all extracted files
-    extracted_files = get_all_files(output_dir)
-    
-    # Step 4: Apply YARA rules to extracted files
-    matches = apply_yara_rules(rules, extracted_files)
-    
-    # Step 5: Report matches
-    if matches:
-        yara_results_file = os.path.join(output_dir, 'yara_results.txt')
-        write_yara_results(matches, yara_results_file)
-        print(f"YARA results written to {yara_results_file}")
-    else:
-        print("No YARA matches found.")
-    
-    # Step 6: Parse Bulk Extractor output for artifacts
-    artifacts = parse_bulk_extractor_output(output_dir)
-    
-    # Step 7: Write final report
-    write_final_report(output_dir, matches, artifacts)
-    print(f"Final report written to {os.path.join(output_dir, 'final_report.txt')}")
+    with open(report_file, 'w') as json_report:
+        json.dump(report_data, json_report, indent=4)
 
-# Command-line interface
+    print(f"Consolidated JSON report created at {report_file}")
+
+def main():
+    yara_rule = input("Enter the path to the YARA rule file: ")
+    input_path = get_input_path()
+    output_path = get_output_path()
+
+    # Clear the output directory to avoid conflicts
+    clear_output_directory(output_path)
+
+    # Run Bulk Extractor first
+    run_bulk_extractor(input_path, output_path)
+
+    # Assume the Bulk Extractor output directory is the input for YARA
+    yara_output_file = run_yara(yara_rule, output_path, output_path)
+
+    # Create a consolidated JSON report
+    report_file = os.path.join(output_path, "consolidated_report.json")
+    create_consolidated_report(output_path, yara_output_file, report_file)
+
 if __name__ == "__main__":
-    parser = argparse.ArgumentParser(description="Forensic Analysis Tool combining Bulk Extractor and YARA")
-    parser.add_argument('input_image', help="Input disk image or directory for analysis")
-    parser.add_argument('output_dir', help="Directory to store Bulk Extractor results")
-    parser.add_argument('yara_rule_path', help="Path to YARA rules file")
-    
-    args = parser.parse_args()
-    forensic_analysis(args.input_image, args.output_dir, args.yara_rule_path)
+    main()
